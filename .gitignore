@@ -1,0 +1,8 @@
+code_generator/
+
+__pycache__/
+*.py[cod]
+
+perf_model/figure.png
+perf_model/log.txt
+perf_model/search_results.csv
