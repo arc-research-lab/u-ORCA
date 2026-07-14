@@ -1,6 +1,6 @@
 import itertools
 import math
-from perf_model import estimate_model, params_phi, params_rho
+from perf_model import DATATYPE_CONFIGS, estimate_model, params_phi, params_rho
 
 def next_power_of_two(x):
     """return the next power of two >= x"""
@@ -44,15 +44,21 @@ def generate_B_candidates(K, BK):
 
     return candidates
 
-def design_space_exploration(in_shapes, params):
+def design_space_exploration(in_shapes, params, datatype="int8", A_limit=8, B_limit=38):
     """
     in_shapes: [[M1,K1,N1],[M2,K2,N2],...]
+    datatype: datatype of the kernel
+    A_limit: max AIE array size in the M dim
+    B_limit: max AIE array size in the K dim
     return best_config, best_latency
     """
+    if datatype not in DATATYPE_CONFIGS:
+        raise NotImplementedError(f"datatype {datatype} is not supported")
+    datatype_config = DATATYPE_CONFIGS[datatype]
 
-    BM = params["BM"]
-    BK = params["BK"]
-    BN = params["BN"]
+    BM = datatype_config["BM"]
+    BK = datatype_config["BK"]
+    BN = datatype_config["BN"]
 
     # -----------------------------
     # Step 1: padding
@@ -75,10 +81,12 @@ def design_space_exploration(in_shapes, params):
     for M, K, N in padded_shapes:
         A_sets.append(set(generate_A_candidates(M, BM)))
 
-    A_candidates = sorted(set.intersection(*A_sets))
+    A_candidates = [A for A in sorted(set.intersection(*A_sets)) if A <= A_limit]
 
     best_lat = float("inf")
     best_config = None
+    best_comp = None
+    best_comm = None
 
     # -----------------------------
     # Step 3: enumerate Ai
@@ -87,7 +95,7 @@ def design_space_exploration(in_shapes, params):
         # B candidates per layer
         B_candidates = []
         for M, K, N in padded_shapes:
-            B_candidates.append(generate_B_candidates(K, BK))
+            B_candidates.append([B for B in generate_B_candidates(K, BK) if B <= B_limit])
         # print(B_candidates)
         for B_tuple in itertools.product(*B_candidates):
             config = []
@@ -95,7 +103,7 @@ def design_space_exploration(in_shapes, params):
                 B = B_tuple[i]
                 config.append([M, K, N, A, B, 1, 1, 1])
 
-            lat, comp, comm = estimate_model(config, 'cascade', params)
+            lat, comp, comm = estimate_model(config, 'cascade', params, datatype)
 
             if lat < best_lat:
                 best_lat = lat
@@ -117,39 +125,66 @@ def model_param_size_esti(shapes):
 
 
 
-def deepsets_estimation(phi_shapes,rho_shapes):
+def deepsets_estimation(phi_shapes, rho_shapes, datatype="int8", A_limit=8, B_limit=37):
+    if datatype not in DATATYPE_CONFIGS:
+        raise NotImplementedError(f"datatype {datatype} is not supported")
+    byte_per_element = DATATYPE_CONFIGS[datatype]["byte_per_element"]
     DMA_ovhd = 30#30 cycles to init DMA
     DMA_BW = 4 #byte/cycle
-    #search the best config for phi and rho layers
-    phi_config,phi_lat,phi_comp,phi_comm= design_space_exploration(phi_shapes,params_phi)
-    rho_config,rho_lat,rho_comp,rho_comm= design_space_exploration(rho_shapes,params_rho)
-    #as the AIEs shouldn't over utilize, only check the B dim
-    total_B=1#GA layer
-    for layer in phi_config+rho_config:
-        total_B+=layer[4]
-    assert total_B <= 38, f"too many AIEs utilized in the col dim! expect <=38, get{total_B}"
-    #compute final latency
-    final_lat = phi_comp + rho_comp 
-    #add input comm lat
-    layer = phi_config[0]
-    M,K,N,A,B,C,bias,relu = layer
-    h1 = math.ceil(M/A)
-    w1 = math.ceil(K/B)
-    comm_in = h1*w1#Byte
-    max_comm_distance = A*C+2
-    in_lat = DMA_ovhd + comm_in/DMA_BW + 4*max_comm_distance
-    #add inter layer comm lat
-    inter_lat = len(phi_config)*params_phi["O_cas"]+len(rho_config)*params_rho["O_cas"]
-    #add out lat
-    comm_out=64#pad 1x10 --> 4x16
-    out_lat = DMA_ovhd + comm_out/DMA_BW
-    final_lat += in_lat + inter_lat + out_lat
-    #convert from cycles to ns
-    final_lat /= 1.25
-    #add GA layers: for an MxN mat the latency almost do not change with N dim
-    final_lat+=150
-    final_param = model_param_size_esti(phi_config+rho_config)
-    return final_lat, final_param
+
+    best_final_lat = float("inf")
+    best_phi_config = None
+    best_rho_config = None
+
+    for phi_B_limit in range(1, B_limit):
+        rho_B_limit = B_limit - phi_B_limit
+        phi_config,phi_lat,phi_comp,phi_comm= design_space_exploration(
+            phi_shapes, params_phi, datatype, A_limit, phi_B_limit
+        )
+        rho_config,rho_lat,rho_comp,rho_comm= design_space_exploration(
+            rho_shapes, params_rho, datatype, A_limit, rho_B_limit
+        )
+        if phi_config is None or rho_config is None:
+            continue
+
+        phi_total_B = sum(layer[4] for layer in phi_config)
+        rho_total_B = sum(layer[4] for layer in rho_config)
+        if phi_total_B > phi_B_limit or rho_total_B > rho_B_limit:
+            continue
+
+        #compute final latency
+        final_lat = phi_comp + rho_comp
+        #add input comm lat
+        layer = phi_config[0]
+        M,K,N,A,B,C,bias,relu = layer
+        h1 = math.ceil(M/A)
+        w1 = math.ceil(K/B)
+        comm_in = h1*w1*byte_per_element#Byte
+        max_comm_distance = A*C+2
+        in_lat = DMA_ovhd + comm_in/DMA_BW + 4*max_comm_distance
+        #add inter layer comm lat
+        inter_lat = len(phi_config)*params_phi["O_cas"]+len(rho_config)*params_rho["O_cas"]
+        #add out lat
+        comm_out=64*byte_per_element#pad 1x10 --> 4x16
+        out_lat = DMA_ovhd + comm_out/DMA_BW
+        final_lat += in_lat + inter_lat + out_lat
+        #convert from cycles to ns
+        final_lat /= 1.25
+        #add GA layers: for an MxN mat the latency almost do not change with N dim
+        final_lat+=150
+
+        if final_lat < best_final_lat:
+            best_final_lat = final_lat
+            best_phi_config = phi_config
+            best_rho_config = rho_config
+
+    if best_phi_config is None or best_rho_config is None:
+        return None, None
+
+    print('phi_shapes,',best_phi_config)
+    print('rho_shapes,',best_rho_config)
+    final_param = model_param_size_esti(best_phi_config+best_rho_config)
+    return best_final_lat, final_param
 if __name__ == "__main__":
     model = [[64,64,64] for i in range(3)]
     best_config, best_lat = design_space_exploration(model,params_phi)

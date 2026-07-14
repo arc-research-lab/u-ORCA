@@ -11,9 +11,6 @@ DATATYPE_CONFIGS = {
 }
 
 params_phi = {
-    "BM":4,
-    "BK":8,
-    "BN":8,
     "L_epi": 2,
     "L_br":1,
     "L_o": 0,
@@ -21,9 +18,6 @@ params_phi = {
     "O_cas": 0
 }
 params_rho = {
-    "BM":4,
-    "BK":8,
-    "BN":8,
     "L_epi": 2,
     "L_br":2,
     "L_o": 59,
