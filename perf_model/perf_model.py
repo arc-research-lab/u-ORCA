@@ -1,8 +1,9 @@
 import math
 
 DATATYPE_CONFIGS = {
+    "int4": {"BM": 4, "BK": 16, "BN": 8, "mac_cycles": 1, "byte_per_element": 1},
     "int8": {"BM": 4, "BK": 8, "BN": 8, "mac_cycles": 1, "byte_per_element": 1},
-    "int16": {"BM": 4, "BK": 2, "BN": 8, "mac_cycles": 1, "byte_per_element": 2},
+    "int16": {"BM": 4, "BK": 4, "BN": 4, "mac_cycles": 1, "byte_per_element": 2},
     "int32": {"BM": 4, "BK": 2, "BN": 4, "mac_cycles": 2, "byte_per_element": 4},
     "bf16": {"BM": 4, "BK": 8, "BN": 4, "mac_cycles": 1, "byte_per_element": 2},
     "fp32_fast": {"BM": 4, "BK": 8, "BN": 4, "mac_cycles": 3, "byte_per_element": 4},
