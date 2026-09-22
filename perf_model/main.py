@@ -17,14 +17,18 @@ from perf_model import DATATYPE_CONFIGS
 # ]
 
 phi_layers = [
-    [64,21,32],
-    [64,32,32],
-    [64,32,32]
+    # [64,21,32],
+    # [64,32,32],
+    # [64,32,32]
+    [64,21,64],
+    [64,64,64],
+    [64,64,64]
 ]
 rho_layers = [
-    [1,32,32],
-    [1,32,32],
-    [1,32,10]
+    [1,64,64],
+    # [1,64,64],
+    # [1,64,64],
+    [1,64,10]
 ]
 
 
@@ -33,3 +37,4 @@ for datatype in DATATYPE_CONFIGS:
     print(f'datatype: {datatype}')
     print(f'estimated latency: {lat} ns')
     print(f'param size: {param}')
+    print('----------------------')

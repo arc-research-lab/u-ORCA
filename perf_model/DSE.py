@@ -1,6 +1,12 @@
 import itertools
 import math
-from perf_model import DATATYPE_CONFIGS, estimate_model, params_phi, params_rho
+from perf_model import (
+    DATATYPE_CONFIGS,
+    estimate_model,
+    get_global_aggregation_ns,
+    get_stage_params,
+    params_phi,
+)
 
 def next_power_of_two(x):
     """return the next power of two >= x"""
@@ -135,14 +141,16 @@ def deepsets_estimation(phi_shapes, rho_shapes, datatype="int8", A_limit=8, B_li
     best_final_lat = float("inf")
     best_phi_config = None
     best_rho_config = None
+    phi_params = get_stage_params(datatype, "phi")
+    rho_params = get_stage_params(datatype, "rho")
 
     for phi_B_limit in range(1, B_limit):
         rho_B_limit = B_limit - phi_B_limit
         phi_config,phi_lat,phi_comp,phi_comm= design_space_exploration(
-            phi_shapes, params_phi, datatype, A_limit, phi_B_limit
+            phi_shapes, phi_params, datatype, A_limit, phi_B_limit
         )
         rho_config,rho_lat,rho_comp,rho_comm= design_space_exploration(
-            rho_shapes, params_rho, datatype, A_limit, rho_B_limit
+            rho_shapes, rho_params, datatype, A_limit, rho_B_limit
         )
         if phi_config is None or rho_config is None:
             continue
@@ -163,7 +171,7 @@ def deepsets_estimation(phi_shapes, rho_shapes, datatype="int8", A_limit=8, B_li
         max_comm_distance = A*C+2
         in_lat = DMA_ovhd + comm_in/DMA_BW + 4*max_comm_distance
         #add inter layer comm lat
-        inter_lat = len(phi_config)*params_phi["O_cas"]+len(rho_config)*params_rho["O_cas"]
+        inter_lat = len(phi_config)*phi_params["O_cas"]+len(rho_config)*rho_params["O_cas"]
         #add out lat
         comm_out=64*byte_per_element#pad 1x10 --> 4x16
         out_lat = DMA_ovhd + comm_out/DMA_BW
@@ -171,7 +179,7 @@ def deepsets_estimation(phi_shapes, rho_shapes, datatype="int8", A_limit=8, B_li
         #convert from cycles to ns
         final_lat /= 1.25
         #add GA layers: for an MxN mat the latency almost do not change with N dim
-        final_lat+=150
+        final_lat += get_global_aggregation_ns(datatype)
 
         if final_lat < best_final_lat:
             best_final_lat = final_lat
