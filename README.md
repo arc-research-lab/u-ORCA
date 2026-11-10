@@ -1,87 +1,99 @@
 # u-ORCA release 1
 
-u-ORCA searches for a DeepSets design and generates AMD AI Engine code.
-This release supports **INT8 only**. `perf_model/` contains the performance
-model and search. `code_gen/` contains the generator and its templates.
+u-ORCA estimates how long a DeepSets network will take to run and generates
+AMD AI Engine (AIE) code for it. This release supports **INT8 only**.
 
-## 1. Use the performance model
+Use Python 3.10 or later. Run the commands below from the folder containing
+this README.
 
-Use Python 3.10 or newer. Run all commands from the repository root.
-The performance model uses only the Python standard library.
+## 1. How to use the performance model
 
-Edit `perf_model/example.json` to describe your network. Each layer is
-`[M, K, N]`: M is the number of input rows, K is the input width, and N is
-the output width. `phi` processes the set elements. Aggregation reduces
-them to one row, which `rho` processes. Use M=1 for the logical rho layers.
-Each stage needs at least two layers.
+**Describe the network.** The included file `perf_model/example.json` contains:
 
-Search for a design:
+```json
+{
+  "graph_name": "ExampleDeepSetsGraph",
+  "datatype": "int8",
+  "phi": [[64, 21, 64], [64, 64, 64], [64, 64, 64]],
+  "rho": [[1, 64, 64], [1, 64, 10]]
+}
+```
+
+Each entry describes one layer as `[number of rows, input width, output width]`.
+For example, `[64, 21, 64]` takes 64 rows with 21 values in each row and
+produces 64 values per row.
+
+The `phi` layers process each row. Their final outputs are combined into one
+row, which is then passed through the `rho` layers. In this example, the
+network produces 10 values. Use 1 as the row count in `rho`.
+
+To try your own network, copy this file and change the layer sizes. Keep
+at least two layers in each list. The search enables bias and ReLU in every
+layer.
+
+**Run the search.** Start with the included example:
 
 ```bash
 python -m perf_model.main --model perf_model/example.json --out build/design.json
 ```
 
-The command prints estimated latency in nanoseconds and saves the chosen
-design to `build/design.json`. It also prints an AIE-only estimate. The full
-estimate includes input and output transfers; the AIE-only estimate does not.
-Both use a 1.25 GHz AIE clock and the published INT8 calibration.
+For your own network, replace `perf_model/example.json` with your file path.
+No extra Python packages are needed for this step.
 
-The search pads dimensions to tile sizes and powers of two. It skips mappings
-that do not meet the generator's shape rules, including cascade alignment
-and the fixed rho layout (M=4, A=1). It enables bias and ReLU for every layer.
-If no mapping fits, it reports an error and does not write a design file.
+**Read the result.** The example prints:
 
-You can limit the search with `--a-limit 8 --b-limit 37`. A limits the number
-of phi row partitions. B limits the **sum** of K partitions across all phi
-and rho layers. These checks cover the generator's shape rules; Vitis still
-checks device placement and memory use when compiling.
+```text
+Estimated latency: 746.0 ns
+AIE-only estimate: 627.6 ns
+Parameters: 15632
+Design saved to build/design.json
+```
 
-## 2. Generate code
+The first estimate includes input and output transfers. The AIE-only
+estimate excludes those transfers. Both are in nanoseconds.
+`Parameters` counts weights and biases after rounding layer sizes up to fit
+the hardware.
 
-Install the Python packages, then generate a project from the saved design:
+The search saves its chosen hardware configuration to `build/design.json`.
+Use that file in the next section. Configurations that the code generator
+cannot support are skipped. If none fit, the search reports an error.
+
+## 2. How to generate code
+
+**Generate a project.** Install the required Python packages, then use the
+design file from section 1:
 
 ```bash
 python -m pip install -r requirements.txt
 python -m code_gen.generate --spec build/design.json --out-dir build/project
 ```
 
-The project contains AIE kernels and graph files in `src/aie/`, a Makefile,
-and a copy of the design. Choose a new output directory for each generation.
-The generator does not overwrite an existing project.
+The generated project is in `build/project`:
 
-To provide a design yourself, use the same JSON format as `build/design.json`.
-Each layer is `[M, K, N, A, B, C, bias, relu]`. A, B, and C split the M, K,
-and N dimensions. Bias and ReLU use 0 or 1. All layers require C=1. Phi layers
-must use the same A and M/A=8, with A at least 2. Rho layers require M=4 and
-A=1. N must be a multiple of 16; K/B must be a multiple of 8 in the first
-phi layer and a multiple of 16 in later phi layers and all rho layers.
-Adjacent layer widths must match. The generator reports invalid inputs.
+- `src/aie/` contains the C++ code for the layers and their connections.
+- `Makefile` contains the commands to compile and simulate the code.
+- `uorca_spec.json` is a copy of the hardware configuration.
 
-For a simulation check, create random inputs, weights, biases, and expected
-outputs. This checks the generated kernels; it does not load a trained model.
+If `build/project` already exists, choose a new path with `--out-dir`.
+Code generation is now complete. Vitis is only needed for the optional
+compilation and simulation below.
 
-```bash
-python -m code_gen.data generate --project-dir build/project
-```
-
-Compile and simulate with AMD Vitis 2024.1 and the VEK280 base platform.
-Replace the setup path below with your Vitis installation path:
+**Optional: compile and check the code.** This requires AMD Vitis 2024.1
+and its VEK280 base platform. Replace `/path/to/Vitis` with your installation
+path. If you chose a different project directory, use it in all commands below.
 
 ```bash
 source /path/to/Vitis/2024.1/settings64.sh
+python -m code_gen.data generate --project-dir build/project
 make -C build/project graph
 make -C build/project aiesim
 python -m code_gen.data compare --project-dir build/project
 ```
 
-The Makefile finds the VEK280 platform under `$XILINX_VITIS/base_platforms`.
-If it is installed elsewhere, pass `PLATFORM=/path/to/platform.xpfm` to make.
-The simulation runs 20 frames; the comparison checks every output value.
-The generated project covers AIE compilation and simulation. Host and PL
-applications are outside this release.
+This creates random inputs and weights, runs the AIE simulator, and compares
+its output with a Python calculation. It does not use a trained model.
+If all 20 test inputs pass, the last command prints:
 
-To run the Python checks without Vitis:
-
-```bash
-python -m unittest discover -s tests -v
+```text
+Correctness check passed: 20 output frames match exactly
 ```
