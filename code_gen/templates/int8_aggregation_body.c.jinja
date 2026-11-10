@@ -1,0 +1,27 @@
+#include <aie_api/aie.hpp>
+#include "{{ header_file }}"
+
+using namespace {{ name }};
+
+void {{ kernel_name }}(
+    adf::input_buffer<int8>& __restrict input_act,
+    input_cascade<acc32>* __restrict cascade_i,
+    output_cascade<acc32>* __restrict cascade_o) {
+    int8* __restrict pA = input_act.data();
+    using MMUL = aie::mmul<blk_M, blk_N, blk_N, int8, int8>;
+    const int8 weights_mem[32] = {
+        1,1,1,1,1,1,1,1, 0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0};
+    auto weights = aie::load_v<MMUL::size_A>(weights_mem);
+    for (unsigned j = 0; j < bound_j; ++j)
+        chess_prepare_for_pipelining chess_loop_range(bound_j, bound_j) {
+        int8* pA1 = pA + j * blk_size;
+        int8* pA2 = pA + (bound_j + j) * blk_size;
+        auto activation = aie::concat(
+            aie::load_v<blk_M * blk_N>(pA1),
+            aie::load_v<blk_M * blk_N>(pA2));
+        MMUL accumulator(get_scd_v32acc32());
+        accumulator.mac(weights, activation);
+        put_mcd(accumulator.to_accum());
+    }
+}

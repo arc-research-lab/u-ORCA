@@ -1,0 +1,6 @@
+{
+  "graph_name": "ExampleDeepSetsGraph",
+  "datatype": "int8",
+  "phi": [[64, 21, 64], [64, 64, 64], [64, 64, 64]],
+  "rho": [[1, 64, 64], [1, 64, 10]]
+}

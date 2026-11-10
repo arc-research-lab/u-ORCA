@@ -1,0 +1,26 @@
+#pragma once
+#include <adf.h>
+#include <aie_api/aie.hpp>
+
+namespace {{ name }} {
+constexpr unsigned PM = {{ aggregation.PM }};
+constexpr unsigned PN = {{ aggregation.PN }};
+constexpr unsigned A = {{ aggregation.A }};
+constexpr unsigned blk_M = {{ aggregation.BM }};
+constexpr unsigned blk_N = {{ aggregation.BN }};
+constexpr unsigned blk_size = blk_M * blk_N;
+constexpr unsigned bound_i = PM / A / blk_M;
+constexpr unsigned bound_j = PN / blk_N;
+}
+
+void {{ kernels[0].kernel_name }}(
+    adf::input_buffer<{{ profile.input_cpp_type }}>& __restrict input_act,
+    output_cascade<{{ profile.accumulator_cpp_type }}>* __restrict cascade_o);
+void {{ kernels[1].kernel_name }}(
+    adf::input_buffer<{{ profile.input_cpp_type }}>& __restrict input_act,
+    input_cascade<{{ profile.accumulator_cpp_type }}>* __restrict cascade_i,
+    output_cascade<{{ profile.accumulator_cpp_type }}>* __restrict cascade_o);
+void {{ kernels[2].kernel_name }}(
+    adf::input_buffer<{{ profile.input_cpp_type }}>& __restrict input_act,
+    input_cascade<{{ profile.accumulator_cpp_type }}>* __restrict cascade_i,
+    output_cascade<{{ profile.accumulator_cpp_type }}>* __restrict cascade_o);
