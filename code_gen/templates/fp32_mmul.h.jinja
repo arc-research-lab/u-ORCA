@@ -1,0 +1,21 @@
+// Select accurate FP32 multiplication explicitly. Vitis 2024.1 otherwise
+// enables its fast approximation before it reads the kernel source.
+namespace {
+struct Fp32Mmul : aie::mmul<4, 8, 4, float, float, accfloat> {
+    using Base = aie::mmul<4, 8, 4, float, float, accfloat>;
+    using Base::Base;
+    using Base::operator=;
+
+    __aie_inline void mul(const aie::vector<float, 32>& a,
+                          const aie::vector<float, 32>& b) {
+        Base::operator=(aie::accum<accfloat, 16>(
+            ::mul_4x8_8x4_accuracy_safe(a, b)));
+    }
+
+    __aie_inline void mac(const aie::vector<float, 32>& a,
+                          const aie::vector<float, 32>& b) {
+        Base::operator=(aie::accum<accfloat, 16>(
+            ::mac_4x8_8x4_accuracy_safe(a, b, Base::to_accum())));
+    }
+};
+}

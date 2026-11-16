@@ -1,0 +1,10 @@
+{
+  "graph_name": "MinimalMlpGraph",
+  "model_type": "mlp",
+  "datatype": "int8",
+  "layers": [
+    [64, 32, 32, 4, 2, 1, 1, 1],
+    [64, 32, 32, 4, 2, 1, 1, 1],
+    [64, 32, 16, 4, 2, 1, 1, 1]
+  ]
+}

@@ -1,0 +1,40 @@
+#include <aie_api/aie.hpp>
+#include <type_traits>
+#include "{{ header_file }}"
+
+using namespace {{ name }};
+
+void {{ kernel_name }}(
+    adf::input_buffer<bfloat16>& __restrict input_act,
+    input_cascade<accfloat>* __restrict cascade_i,
+    output_cascade<accfloat>* __restrict cascade_o) {
+    aie::set_saturation(aie::saturation_mode::saturate);
+    aie::set_rounding(aie::rounding_mode::conv_even);
+    bfloat16* __restrict pA = input_act.data();
+    using MMUL = aie::mmul<blk_M, 2 * blk_N, blk_N, bfloat16, bfloat16, accfloat>;
+    static_assert(std::is_same_v<typename MMUL::accum_type::value_type, accfloat>);
+    const bfloat16 weights_mem[32] = {
+        1,1,1,1,1,1,1,1, 0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0};
+    auto weights = aie::load_v<MMUL::size_A>(weights_mem);
+    for (unsigned j = 0; j < bound_j; j += 2)
+        chess_prepare_for_pipelining chess_loop_range(bound_j / 2, bound_j / 2) {
+        bfloat16* pA00 = pA + j * blk_size;
+        bfloat16* pA10 = pA + (bound_j + j) * blk_size;
+        bfloat16* pA01 = pA + (j + 1) * blk_size;
+        bfloat16* pA11 = pA + (bound_j + j + 1) * blk_size;
+        auto activation0 = aie::concat(
+            aie::load_v<blk_M * blk_N>(pA00),
+            aie::load_v<blk_M * blk_N>(pA10));
+        auto activation1 = aie::concat(
+            aie::load_v<blk_M * blk_N>(pA01),
+            aie::load_v<blk_M * blk_N>(pA11));
+        MMUL accumulator0(get_scd_v16accfloat());
+        accumulator0.mac(weights, activation0);
+        MMUL accumulator1(get_scd_v16accfloat());
+        accumulator1.mac(weights, activation1);
+        put_mcd(aie::concat(
+            accumulator0.template to_vector<bfloat16>(),
+            accumulator1.template to_vector<bfloat16>()));
+    }
+}

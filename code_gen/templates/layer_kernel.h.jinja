@@ -1,0 +1,50 @@
+#pragma once
+#include <adf.h>
+#include <aie_api/aie.hpp>
+
+namespace {{ name }} {
+constexpr unsigned M = {{ layer.M }};
+constexpr unsigned K = {{ layer.K }};
+constexpr unsigned N = {{ layer.N }};
+constexpr unsigned A = {{ layer.A }};
+constexpr unsigned B = {{ layer.B }};
+constexpr unsigned C = {{ layer.C }};
+constexpr unsigned BM = {{ layer.BM }};
+constexpr unsigned BK = {{ layer.BK }};
+constexpr unsigned BN = {{ layer.BN }};
+constexpr unsigned rowA = M / A;
+constexpr unsigned colA = K / B;
+constexpr unsigned colB = N / C;
+constexpr unsigned bound_i = rowA / BM;
+constexpr unsigned bound_k = colA / BK;
+constexpr unsigned bound_j = colB / BN;
+constexpr int SCALE_SHIFT = {{ profile.matmul_shift }};
+constexpr bool USE_BIAS = {{ "true" if layer.use_bias else "false" }};
+constexpr bool USE_RELU = {{ "true" if layer.use_relu else "false" }};
+}
+
+{% for kernel in kernels %}
+void {{ kernel.kernel_name }}(
+{% if source == "io_buf" %}
+    adf::input_buffer<{{ profile.input_cpp_type }}>& __restrict input_act,
+{% if kernel.needs_partial_acc %}
+    input_cascade<{{ profile.accumulator_cpp_type }}>* __restrict cascade_i,
+{% endif %}
+{% else %}
+    input_cascade<{{ profile.accumulator_cpp_type }}>* __restrict cascade_i,
+{% endif %}
+{% if profile.name == "int4" %}
+    const int8(&weight1)[{{ name }}::colA * {{ name }}::colB / 2],
+{% else %}
+    const {{ profile.weight_cpp_type }}(&weight1)[{{ name }}::colA * {{ name }}::colB],
+{% endif %}
+{% if kernel.needs_bias_port %}
+    const {{ profile.bias_cpp_type }}(&bias)[{{ name }}::colB],
+{% endif %}
+{% if kernel.emits_io_buffer %}
+    adf::output_buffer<{{ profile.output_cpp_type }}>& __restrict output_act
+{% else %}
+    output_cascade<{{ profile.accumulator_cpp_type }}>* __restrict cascade_o
+{% endif %}
+);
+{% endfor %}
