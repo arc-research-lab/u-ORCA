@@ -25,7 +25,7 @@ constexpr bool USE_RELU = {{ "true" if layer.use_relu else "false" }};
 
 {% for kernel in kernels %}
 void {{ kernel.kernel_name }}(
-{% if stage == "phi" and role == "first" %}
+{% if source == "io_buf" %}
     adf::input_buffer<{{ profile.input_cpp_type }}>& __restrict input_act,
 {% if kernel.needs_partial_acc %}
     input_cascade<{{ profile.accumulator_cpp_type }}>* __restrict cascade_i,

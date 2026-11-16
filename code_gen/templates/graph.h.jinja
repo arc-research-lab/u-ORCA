@@ -19,7 +19,9 @@ class {{ spec.graph_name }} : public graph {
 {% for layer in spec.matmul_layers %}
     kernel {{ layer.name }}[{{ layer.name }}::A][{{ layer.name }}::B][{{ layer.name }}::C];
 {% endfor %}
+{% if spec.has_aggregation %}
     kernel {{ spec.aggregation.name }}[{{ spec.aggregation.name }}::A];
+{% endif %}
 
    public:
 {% for layer in spec.matmul_layers %}
@@ -28,10 +30,10 @@ class {{ spec.graph_name }} : public graph {
     input_port {{ layer.name }}_bias[{{ layer.name }}::A][{{ layer.name }}::C];
 {% endif %}
 {% endfor %}
-{% set first_phi = spec.phi_layers|first %}
-{% set final_rho = spec.rho_layers|last %}
-    input_plio pl_in[{{ first_phi.name }}::A][{{ first_phi.name }}::B];
-    output_plio pl_out[{{ final_rho.name }}::A][{{ final_rho.name }}::C];
+{% set input_layer = spec.input_layer %}
+{% set output_layer = spec.output_layer %}
+    input_plio pl_in[{{ input_layer.name }}::A][{{ input_layer.name }}::B];
+    output_plio pl_out[{{ output_layer.name }}::A][{{ output_layer.name }}::C];
 
     {{ spec.graph_name }}() {
         // Create matmul kernels.
@@ -57,6 +59,7 @@ class {{ spec.graph_name }} : public graph {
         }
 {% endfor %}
 
+{% if spec.has_aggregation %}
         // Create global aggregation kernels.
         {
             using namespace {{ spec.aggregation.name }};
@@ -75,6 +78,7 @@ class {{ spec.graph_name }} : public graph {
             runtime<ratio>({{ spec.aggregation.name }}[{{ a_pos }}]) = 1;
 {% endfor %}
         }
+{% endif %}
 
         // Connect K partitions within matmul layers.
 {% for layer in spec.matmul_layers %}
@@ -93,7 +97,7 @@ class {{ spec.graph_name }} : public graph {
         }
 {% endfor %}
 
-        // Connect phi layers.
+        // Connect the phi or standalone MLP layers.
 {% for layer in spec.phi_layers %}
 {% if not loop.last %}
 {% set next_layer = spec.phi_layers[loop.index0 + 1] %}
@@ -107,6 +111,7 @@ class {{ spec.graph_name }} : public graph {
 {% endif %}
 {% endfor %}
 
+{% if spec.has_aggregation %}
         // Connect final phi output buffers into the global aggregation chain.
 {% set final_phi = spec.phi_layers|last %}
         for (unsigned a = 0; a < {{ final_phi.name }}::A; a++) {
@@ -142,11 +147,12 @@ class {{ spec.graph_name }} : public graph {
         }
 {% endif %}
 {% endfor %}
+{% endif %}
 
         // Create and connect input PLIOs.
         {
-            using namespace {{ first_phi.name }};
-            auto& layer = {{ first_phi.name }};
+            using namespace {{ input_layer.name }};
+            auto& layer = {{ input_layer.name }};
             for (unsigned a = 0; a < A; a++) {
                 for (unsigned b = 0; b < B; b++) {
                     std::string name =
@@ -164,8 +170,8 @@ class {{ spec.graph_name }} : public graph {
 
         // Create and connect output PLIOs.
         {
-            using namespace {{ final_rho.name }};
-            auto& layer = {{ final_rho.name }};
+            using namespace {{ output_layer.name }};
+            auto& layer = {{ output_layer.name }};
             for (unsigned a = 0; a < A; a++) {
                 for (unsigned c = 0; c < C; c++) {
                     std::string name =
@@ -223,7 +229,7 @@ class {{ spec.graph_name }} : public graph {
         }
 {% endfor %}
 
-        // Place phi matmul kernels. Aggregation and rho placement is compiler-selected in graph v1.
+        // Place local-memory matmul kernels. The compiler places aggregation and rho.
 {% set placement = namespace(base_col=6) %}
 {% for layer in spec.phi_layers %}
         {

@@ -153,7 +153,7 @@ def _aie_aggregation(phi_output: np.ndarray, spec: ModelSpec) -> np.ndarray:
 def generate_quantized_data(spec: ModelSpec, seed: int) -> QuantizedData:
     """Generate random integer tensors; no trained weights are required."""
     rng = np.random.default_rng(seed)
-    first = spec.phi_layers[0]
+    first = spec.input_layer
     input_act = rng.integers(-96, 97, (first.M, first.K), dtype=np.int8)
     weights = {}
     biases = {}
@@ -162,7 +162,7 @@ def generate_quantized_data(spec: ModelSpec, seed: int) -> QuantizedData:
         biases[name] = rng.integers(-32, 33, layer.N, dtype=np.int8)
     activation = input_act
     for stage, layers in (("phi", spec.named_phi_layers()), ("rho", spec.named_rho_layers())):
-        if stage == "rho":
+        if stage == "rho" and spec.has_aggregation:
             activation = _aie_aggregation(activation, spec)
         for name, layer in layers:
             activation = _aie_matmul(
@@ -173,13 +173,13 @@ def generate_quantized_data(spec: ModelSpec, seed: int) -> QuantizedData:
     return QuantizedData(input_act, weights, biases, activation)
 
 
-def _write_first_phi_inputs(
+def _write_model_inputs(
     spec: ModelSpec,
     data: QuantizedData,
     data_dir: Path,
     run_iterations: int,
 ) -> list[dict[str, object]]:
-    first_phi = spec.phi_layers[0]
+    first_phi = spec.input_layer
     records: list[dict[str, object]] = []
     for a_pos in range(first_phi.A):
         row_slice = slice(a_pos * first_phi.rowA, (a_pos + 1) * first_phi.rowA)
@@ -258,7 +258,7 @@ def _write_golden_outputs(
     data: QuantizedData,
     data_dir: Path,
 ) -> list[dict[str, object]]:
-    final_rho = spec.rho_layers[-1]
+    final_rho = spec.output_layer
     records: list[dict[str, object]] = []
     for a_pos in range(final_rho.A):
         row_slice = slice(a_pos * final_rho.rowA, (a_pos + 1) * final_rho.rowA)
@@ -296,12 +296,13 @@ def generate_data_files(
 
     quantized = generate_quantized_data(spec, seed)
     files = []
-    files.extend(_write_first_phi_inputs(spec, quantized, data_dir, run_iterations))
+    files.extend(_write_model_inputs(spec, quantized, data_dir, run_iterations))
     files.extend(_write_layer_params(spec, quantized, data_dir))
     files.extend(_write_golden_outputs(spec, quantized, data_dir))
 
     manifest = {
         "graph_name": spec.graph_name,
+        "model_type": spec.model_type,
         "seed": seed,
         "run_iterations": run_iterations,
         "datatype": spec.datatype,
@@ -325,7 +326,7 @@ def compare_outputs(spec: ModelSpec, project_dir: str | Path) -> int:
     manifest = json.loads((project / "data/data_manifest.json").read_text())
     expected_frames = manifest["run_iterations"]
     checked = 0
-    final = spec.rho_layers[-1]
+    final = spec.output_layer
     for a in range(final.A):
         for c in range(final.C):
             golden = read_tokens(project / "data" / f"golden_{a}_{c}.txt")

@@ -8,3 +8,14 @@ Work/
 aiesimulator_output/
 .Xil/
 libadf.a
+/demo/*.o
+/demo/*.xo
+/demo/*.xsa
+/demo/*.xclbin
+/demo/*.jou
+/demo/*.summary
+/demo/_x*/
+/demo/package.*/
+/demo/aie_adder
+/demo/run_app.sh
+/demo/emconfig.json

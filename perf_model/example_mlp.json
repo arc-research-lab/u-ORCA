@@ -1,0 +1,6 @@
+{
+  "graph_name": "ExampleMlpGraph",
+  "model_type": "mlp",
+  "datatype": "int8",
+  "layers": [[64, 32, 32], [64, 32, 32], [64, 32, 16]]
+}

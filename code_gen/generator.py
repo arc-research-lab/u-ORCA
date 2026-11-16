@@ -9,7 +9,7 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from .spec import LayerSpec, ModelSpec, Role, Stage, build_model_spec
+from .spec import LayerSpec, ModelSpec, Role, build_mlp_spec, build_model_spec
 
 
 TEMPLATE_DIR = Path(__file__).with_name("templates")
@@ -28,6 +28,17 @@ def make_environment(template_dir: str | Path = TEMPLATE_DIR) -> Environment:
 def build_spec_from_mapping(mapping: dict[str, Any]) -> ModelSpec:
     if "datatype" not in mapping:
         raise ValueError("model input requires a top-level datatype entry")
+    model_type = mapping.get("model_type", "mlp" if "layers" in mapping else "deepsets")
+    if model_type == "mlp":
+        if "phi" in mapping or "rho" in mapping:
+            raise ValueError("MLP input uses layers, without phi or rho")
+        return build_mlp_spec(
+            mapping["layers"], datatype=mapping["datatype"],
+            graph_name=mapping.get("graph_name", "UOrcaGraph"),
+            metadata=mapping.get("metadata"),
+        )
+    if model_type != "deepsets" or "layers" in mapping:
+        raise ValueError("model_type must be mlp (layers) or deepsets (phi and rho)")
     return build_model_spec(
         mapping["phi"],
         mapping["rho"],
@@ -45,7 +56,8 @@ def load_spec(path: str | Path) -> ModelSpec:
 def source_template_name(datatype: str, stage: str, role: Role) -> str:
     if stage not in ("phi", "rho", "aggregation"):
         raise ValueError(f"unknown kernel stage: {stage}")
-    return f"{datatype}_{stage}_{role}.c.jinja"
+    # The historical MLP can also consist of one io-buffer-to-io-buffer layer.
+    return f"{datatype}_{stage}_{'first' if role == 'single' else role}.c.jinja"
 
 
 def _layer_contexts(spec: ModelSpec) -> list[dict[str, object]]:
@@ -66,8 +78,8 @@ def _layer_contexts(spec: ModelSpec) -> list[dict[str, object]]:
                 "C": layer.C,
                 "use_bias": layer.use_bias,
                 "use_relu": layer.use_relu,
-                "source": "io_buf" if stage == "phi" and role == "first" else "cascade",
-                "sink": "io_buf" if role == "last" else "cascade",
+                "source": "io_buf" if stage == "phi" and role in ("first", "single") else "cascade",
+                "sink": "io_buf" if role in ("last", "single") else "cascade",
             }
         )
     return contexts
@@ -92,12 +104,12 @@ def _kernel_context(
         "needs_partial_acc": B_pos > 0,
         "needs_activation_forward": (
             layer_context["stage"] == "phi"
-            and layer_context["role"] != "first"
+            and layer_context["source"] == "cascade"
             and B_pos < layer.B - 1
         ),
         "needs_bias_port": B_pos == layer.B - 1 and layer.use_bias,
         "emits_io_buffer": (
-            B_pos == layer.B - 1 and layer_context["role"] == "last"
+            B_pos == layer.B - 1 and layer_context["sink"] == "io_buf"
         ),
         "kernel_name": f"{layer_context['name']}_mmul_k{B_pos}",
         "source_file": f"{layer_context['name']}_mmul_k{B_pos}.cc",
@@ -138,7 +150,8 @@ def render_manifest(spec: ModelSpec) -> dict[str, object]:
     layer_contexts = _layer_contexts(spec)
     aggregation_name = f"l{spec.aggregation_index}"
     headers = [str(context["header_file"]) for context in layer_contexts]
-    headers.insert(spec.aggregation_index, f"{aggregation_name}_kernel.h")
+    if spec.has_aggregation:
+        headers.insert(spec.aggregation_index, f"{aggregation_name}_kernel.h")
     sources: list[str] = []
     for context in layer_contexts:
         layer = context["layer"]
@@ -147,16 +160,19 @@ def render_manifest(spec: ModelSpec) -> dict[str, object]:
             str(_kernel_context(spec, context, B_pos)["source_file"])
             for B_pos in range(layer.B)
         )
-    sources.extend(
-        str(_aggregation_context(spec, role)["source_file"])
-        for role in AGGREGATION_ROLES
-    )
+    if spec.has_aggregation:
+        sources.extend(
+            str(_aggregation_context(spec, role)["source_file"])
+            for role in AGGREGATION_ROLES
+        )
     sources.append("graph.cpp")
     order = [str(context["name"]) for context in layer_contexts]
-    order.insert(spec.aggregation_index, f"{aggregation_name} (aggregation)")
+    if spec.has_aggregation:
+        order.insert(spec.aggregation_index, f"{aggregation_name} (aggregation)")
     return {
         "graph_name": spec.graph_name,
         "datatype": spec.datatype,
+        "model_type": spec.model_type,
         "headers": headers,
         "sources": sources,
         "layer_order": order,
@@ -182,6 +198,8 @@ def render_header_strings(
             profile=spec.datatype_profile,
             kernels=kernel_contexts,
         )
+    if not spec.has_aggregation:
+        return rendered
     aggregation_contexts = [
         _aggregation_context(spec, role) for role in AGGREGATION_ROLES
     ]
@@ -212,7 +230,7 @@ def render_all_kernel_source_strings(
             rendered[str(kernel_context["source_file"])] = template.render(
                 **kernel_context
             )
-    for role in AGGREGATION_ROLES:
+    for role in AGGREGATION_ROLES if spec.has_aggregation else ():
         context = _aggregation_context(spec, role)
         template = env.get_template(
             source_template_name(spec.datatype, "aggregation", role)
@@ -235,14 +253,15 @@ def render_graph_strings(
         ]
     phi_layers = [layer for layer in layers if layer["stage"] == "phi"]
     rho_layers = [layer for layer in layers if layer["stage"] == "rho"]
-    aggregation_contexts = [
-        _aggregation_context(spec, role) for role in AGGREGATION_ROLES
-    ]
-    aggregation_view = {
-        "name": f"l{spec.aggregation_index}",
-        "A": spec.aggregation.A,
-        "kernels": aggregation_contexts,
-    }
+    aggregation_contexts = []
+    aggregation_view = None
+    if spec.aggregation is not None:
+        aggregation_contexts = [_aggregation_context(spec, role) for role in AGGREGATION_ROLES]
+        aggregation_view = {
+            "name": f"l{spec.aggregation_index}",
+            "A": spec.aggregation.A,
+            "kernels": aggregation_contexts,
+        }
     manifest = render_manifest(spec)
     graph_view = {
         "graph_name": spec.graph_name,
@@ -251,6 +270,9 @@ def render_graph_strings(
         "phi_layers": phi_layers,
         "rho_layers": rho_layers,
         "aggregation": aggregation_view,
+        "has_aggregation": spec.has_aggregation,
+        "input_layer": layers[0],
+        "output_layer": layers[-1],
     }
     context = {
         "spec": graph_view,

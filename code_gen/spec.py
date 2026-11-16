@@ -1,4 +1,4 @@
-"""INT8 DeepSets specifications and the shape rules shared with DSE."""
+"""INT8 DeepSets/MLP specifications and the shape rules shared with DSE."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterable, Literal, Sequence
 
-Stage = Literal["phi", "rho"]
-Role = Literal["first", "body", "last"]
+Stage = Literal["phi", "rho", "mlp"]
+Role = Literal["first", "body", "last", "single"]
 
 
 class SpecError(ValueError):
@@ -179,10 +179,26 @@ class ModelSpec:
 
     datatype_profile: DatatypeProfile
     phi_layers: tuple[LayerSpec, ...]
-    aggregation: AggregationSpec
+    aggregation: AggregationSpec | None
     rho_layers: tuple[LayerSpec, ...]
     graph_name: str = "UOrcaGraph"
     metadata: dict[str, object] = field(default_factory=dict)
+
+    @property
+    def model_type(self) -> str:
+        return "deepsets" if self.has_aggregation else "mlp"
+
+    @property
+    def has_aggregation(self) -> bool:
+        return self.aggregation is not None
+
+    @property
+    def input_layer(self) -> LayerSpec:
+        return self.matmul_layers[0]
+
+    @property
+    def output_layer(self) -> LayerSpec:
+        return self.matmul_layers[-1]
 
     @property
     def datatype(self) -> str:
@@ -226,8 +242,8 @@ class ModelSpec:
 
 
 def network_role(index: int, total: int) -> Role:
-    if total < 2:
-        raise SpecError("phi and rho must each contain at least two layers")
+    if total == 1:
+        return "single"
     if index == 0:
         return "first"
     if index == total - 1:
@@ -237,8 +253,9 @@ def network_role(index: int, total: int) -> Role:
 
 def _parse_inputs(values: Iterable[Sequence[int]], label: str) -> tuple[LayerInput, ...]:
     inputs = tuple(LayerInput.from_sequence(value) for value in values)
-    if len(inputs) < 2:
-        raise SpecError(f"{label} must contain at least two layers")
+    minimum = 1 if label == "mlp" else 2
+    if len(inputs) < minimum:
+        raise SpecError(f"{label} must contain at least {minimum} layer(s)")
     for index, layer_input in enumerate(inputs):
         layer_input.validate(f"{label}[{index}]")
     return inputs
@@ -246,7 +263,7 @@ def _parse_inputs(values: Iterable[Sequence[int]], label: str) -> tuple[LayerInp
 
 def validate_layer(layer: LayerSpec, stage: Stage, index: int) -> None:
     """Check one physical layer, including its cascade packet alignment."""
-    if stage not in ("phi", "rho"):
+    if stage not in ("phi", "rho", "mlp"):
         raise SpecError(f"unknown stage: {stage}")
     label = f"{stage}[{index}]"
     layer.input.validate(label)
@@ -260,7 +277,7 @@ def validate_layer(layer: LayerSpec, stage: Stage, index: int) -> None:
     if layer.C != 1:
         raise SpecError(f"{label}.C must be 1")
     _require_even(f"{label}.bound_j", layer.bound_j, "N/C/BN")
-    if stage == "phi":
+    if stage in ("phi", "mlp"):
         _require_even(f"{label}.bound_i", layer.bound_i, "M/A/BM")
     elif layer.M != 4 or layer.A != 1:
         raise SpecError(f"{label} must use M=4 and A=1")
@@ -271,7 +288,7 @@ def validate_layer(layer: LayerSpec, stage: Stage, index: int) -> None:
 def build_stage_specs(
     values: Iterable[Sequence[int]], stage: Stage
 ) -> tuple[LayerSpec, ...]:
-    """Validate a whole phi or rho chain; DSE uses these same checks."""
+    """Validate a whole MLP, phi or rho chain; DSE uses these same checks."""
     profile = INT8_PROFILE
     layers = tuple(
         LayerSpec(item, profile.BM, profile.BK, profile.BN)
@@ -283,14 +300,43 @@ def build_stage_specs(
             previous = layers[index - 1]
             if previous.M != layer.M or previous.N != layer.K:
                 raise SpecError(f"{stage}[{index}] dimensions must match the previous layer")
-            if stage == "phi" and previous.A != layer.A:
-                raise SpecError("phi layers must use the same A")
+            if stage in ("phi", "mlp") and previous.A != layer.A:
+                raise SpecError(f"{stage} layers must use the same A")
     if stage == "phi":
         if layers[-1].A < 2:
             raise SpecError("aggregation requires final phi A >= 2")
         if layers[-1].bound_i != 2:
             raise SpecError("final phi.bound_i must be 2 (M/A must be 8)")
     return layers
+
+
+def _validate_graph_name(graph_name: str) -> None:
+    if not isinstance(graph_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", graph_name):
+        raise SpecError("graph_name must be a C++ identifier")
+
+
+def build_mlp_spec(
+    layers: Iterable[Sequence[int]],
+    *,
+    datatype: str = "int8",
+    graph_name: str = "UOrcaGraph",
+    metadata: dict[str, object] | None = None,
+) -> ModelSpec:
+    """Restore the standalone matmul chain introduced in commit 06558e7.
+
+    MLP uses the same local-memory kernels as phi, with no aggregation or
+    rho stage. Its common A is independent of DeepSets' aggregation layout.
+    """
+    require_int8(datatype)
+    _validate_graph_name(graph_name)
+    return ModelSpec(
+        datatype_profile=INT8_PROFILE,
+        phi_layers=build_stage_specs(layers, "mlp"),
+        aggregation=None,
+        rho_layers=(),
+        graph_name=graph_name,
+        metadata=metadata or {},
+    )
 
 
 def build_model_spec(
@@ -303,8 +349,7 @@ def build_model_spec(
 ) -> ModelSpec:
     """Build the INT8 specification used by both search and generation."""
     require_int8(datatype)
-    if not isinstance(graph_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", graph_name):
-        raise SpecError("graph_name must be a C++ identifier")
+    _validate_graph_name(graph_name)
     phi_layers = build_stage_specs(phi, "phi")
     rho_layers = build_stage_specs(rho, "rho")
     final_phi = phi_layers[-1]
