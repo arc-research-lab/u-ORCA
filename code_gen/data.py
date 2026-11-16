@@ -1,4 +1,4 @@
-"""Create deterministic INT8 test data and check AIE simulator output."""
+"""Create deterministic test data and check AIE simulator output."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from .generator import load_spec
 from .spec import ModelSpec
 
 DEFAULT_RUN_ITERATIONS = 20
+# Match the tolerances used by the historical floating-point simulator checks.
+FLOAT_TOLERANCES = {"bf16": (1e-3, 1e-3), "fp32": (1e-4, 1e-5)}
 
 
 class DataMismatchError(AssertionError):
@@ -21,7 +23,7 @@ class DataMismatchError(AssertionError):
 
 @dataclass(frozen=True)
 class QuantizedData:
-    """Random quantized tensors plus the INT8 golden output."""
+    """Random tensors plus the datatype-specific golden output."""
 
     input_act: np.ndarray
     weights: dict[str, np.ndarray]
@@ -79,7 +81,7 @@ def from_block_layout(
 
 
 def write_txt(path: str | Path, data: np.ndarray, values_per_line: int) -> None:
-    """Write integer data as whitespace-separated tokens."""
+    """Write numeric data as whitespace-separated tokens."""
 
     flat = np.asarray(data).reshape(-1)
     path = Path(path)
@@ -87,18 +89,26 @@ def write_txt(path: str | Path, data: np.ndarray, values_per_line: int) -> None:
     with path.open("w", encoding="utf-8") as out_file:
         for offset in range(0, flat.size, values_per_line):
             line = flat[offset:offset + values_per_line]
-            out_file.write(" ".join(str(int(v)) for v in line))
+            convert = float if flat.dtype.kind == "f" else int
+            out_file.write(" ".join(str(convert(v)) for v in line))
             out_file.write("\n")
 
 
-def read_tokens(path: Path, *, simulator: bool = False) -> np.ndarray:
+def read_tokens(path: Path, *, simulator: bool = False, floating: bool = False) -> np.ndarray:
     values = []
     for line in path.read_text().splitlines():
         fields = line.split()
         if not fields or (simulator and fields[0] in ("T", "TLAST")):
             continue
-        values.extend(int(value) for value in fields)
-    return np.asarray(values, dtype=np.int64)
+        values.extend((float if floating else int)(value) for value in fields)
+    return np.asarray(values, dtype=np.float32 if floating else np.int64)
+
+
+def _to_bf16(values: np.ndarray) -> np.ndarray:
+    """Round finite FP32 values to BF16, ties to even, in FP32 storage."""
+    bits = np.asarray(values, dtype=np.float32).view(np.uint32)
+    rounded = bits + np.uint32(0x7fff) + ((bits >> 16) & 1)
+    return (rounded & np.uint32(0xffff0000)).view(np.float32)
 
 
 def _round_shift_symmetric_inf(values: np.ndarray, shift: int) -> np.ndarray:
@@ -114,7 +124,13 @@ def _round_shift_symmetric_inf(values: np.ndarray, shift: int) -> np.ndarray:
 
 
 def _to_output_dtype(values: np.ndarray, spec: ModelSpec) -> np.ndarray:
-    return np.clip(values, -128, 127).astype(np.int8)
+    if spec.datatype == "bf16":
+        return _to_bf16(values)
+    if spec.datatype == "fp32":
+        return np.asarray(values, dtype=np.float32)
+    dtype = np.int16 if spec.datatype == "int16" else np.int8
+    limits = np.iinfo(dtype)
+    return np.clip(values, limits.min, limits.max).astype(dtype)
 
 
 def _aie_matmul(
@@ -127,13 +143,23 @@ def _aie_matmul(
     use_relu: bool,
     scale_shift: int,
 ) -> np.ndarray:
-    """Emulate the current generated matmul tail epilogue in integer space."""
+    """Apply matmul, bias, datatype rounding/saturation and optional ReLU."""
+
+    if spec.datatype_profile.floating:
+        acc = lhs @ rhs
+        if use_bias:
+            if bias is None:
+                raise ValueError("bias is required for a biased layer")
+            acc += bias.reshape(1, -1)
+        if use_relu:
+            acc = np.maximum(acc, np.float32(0))
+        return _to_output_dtype(acc, spec)
 
     acc = lhs.astype(np.int64) @ rhs.astype(np.int64)
     if use_bias:
         if bias is None:
             raise ValueError("bias is required for a biased layer")
-        acc += bias.astype(np.int64).reshape(1, -1) << scale_shift
+        acc += bias.astype(np.int64).reshape(1, -1) << (scale_shift if spec.datatype == "int8" else 0)
     quantized = _to_output_dtype(_round_shift_symmetric_inf(acc, scale_shift), spec)
     if use_relu:
         quantized = np.maximum(quantized, 0).astype(quantized.dtype)
@@ -143,23 +169,40 @@ def _aie_matmul(
 def _aie_aggregation(phi_output: np.ndarray, spec: ModelSpec) -> np.ndarray:
     """Emulate the current generated global aggregation kernel chain."""
 
-    reduced = phi_output.astype(np.int64).sum(axis=0)
-    row0 = _to_output_dtype(_round_shift_symmetric_inf(reduced, spec.aggregation_shift), spec)
+    if spec.datatype_profile.floating:
+        row0 = _to_output_dtype(phi_output.sum(axis=0, dtype=np.float32), spec)
+    else:
+        reduced = phi_output.astype(np.int64).sum(axis=0)
+        row0 = _to_output_dtype(_round_shift_symmetric_inf(reduced, spec.aggregation_shift), spec)
     rho_input = np.zeros((4, phi_output.shape[1]), dtype=row0.dtype)
     rho_input[0, :] = row0
     return rho_input
 
 
 def generate_quantized_data(spec: ModelSpec, seed: int) -> QuantizedData:
-    """Generate random integer tensors; no trained weights are required."""
+    """Generate random tensors; no trained weights are required."""
     rng = np.random.default_rng(seed)
     first = spec.input_layer
-    input_act = rng.integers(-96, 97, (first.M, first.K), dtype=np.int8)
+    floating = spec.datatype_profile.floating
+    if floating:
+        input_act = _to_output_dtype(rng.uniform(-0.75, 0.75, (first.M, first.K)), spec)
+    elif spec.datatype == "int16":
+        input_act = rng.integers(-24576, 24577, (first.M, first.K), dtype=np.int16)
+    else:
+        input_act = rng.integers(-96, 97, (first.M, first.K), dtype=np.int8)
     weights = {}
     biases = {}
     for name, _stage, _role, layer in spec.named_matmul_layers():
-        weights[name] = rng.integers(-64, 65, (layer.K, layer.N), dtype=np.int8)
-        biases[name] = rng.integers(-32, 33, layer.N, dtype=np.int8)
+        if floating:
+            weights[name] = _to_output_dtype(rng.uniform(-0.5, 0.5, (layer.K, layer.N)), spec)
+            biases[name] = rng.uniform(-0.25, 0.25, layer.N).astype(np.float32)
+        elif spec.datatype == "int16":
+            weights[name] = rng.integers(-16384, 16385, (layer.K, layer.N), dtype=np.int16)
+            biases[name] = rng.integers(-(1 << 20), (1 << 20) + 1, layer.N, dtype=np.int32)
+        else:
+            low, high = (-8, 8) if spec.datatype == "int4" else (-64, 65)
+            weights[name] = rng.integers(low, high, (layer.K, layer.N), dtype=np.int8)
+            biases[name] = rng.integers(-32, 33, layer.N, dtype=np.int8)
     activation = input_act
     for stage, layers in (("phi", spec.named_phi_layers()), ("rho", spec.named_rho_layers())):
         if stage == "rho" and spec.has_aggregation:
@@ -192,7 +235,7 @@ def _write_model_inputs(
             frame = to_block_layout(partition, first_phi.BM, first_phi.BK)
             stream = np.tile(frame, run_iterations)
             filename = f"input_{a_pos}_{b_pos}.txt"
-            write_txt(data_dir / filename, stream, 16)
+            write_txt(data_dir / filename, stream, 16 // spec.datatype_profile.activation_bytes)
             records.append(
                 {
                     "kind": "input",
@@ -221,7 +264,7 @@ def _write_layer_params(
                     partition = weight[row_slice, col_slice]
                     blocked = to_block_layout(partition, layer.BK, layer.BN)
                     filename = f"{layer_name}_weight_{a_pos}_{b_pos}_{c_pos}.txt"
-                    values_per_line = 16
+                    values_per_line = 32 if spec.datatype == "int4" else 16 // spec.datatype_profile.activation_bytes
                     write_txt(data_dir / filename, blocked, values_per_line)
                     records.append(
                         {
@@ -234,7 +277,9 @@ def _write_layer_params(
                     )
 
         if layer.use_bias:
-            bias = data.biases[layer_name].astype(np.int32) << spec.scale_shift
+            bias = data.biases[layer_name]
+            if not spec.datatype_profile.floating:
+                bias = bias.astype(np.int32) << (spec.scale_shift if spec.datatype == "int8" else 0)
             for a_pos in range(layer.A):
                 for c_pos in range(layer.C):
                     col_slice = slice(c_pos * layer.colB, (c_pos + 1) * layer.colB)
@@ -267,7 +312,7 @@ def _write_golden_outputs(
             partition = data.golden_output[row_slice, col_slice]
             blocked = to_block_layout(partition, final_rho.BM, final_rho.BN)
             filename = f"golden_{a_pos}_{c_pos}.txt"
-            write_txt(data_dir / filename, blocked, 16)
+            write_txt(data_dir / filename, blocked, 16 // spec.datatype_profile.activation_bytes)
             records.append(
                 {
                     "kind": "golden",
@@ -321,23 +366,29 @@ def generate_data_files(
 
 
 def compare_outputs(spec: ModelSpec, project_dir: str | Path) -> int:
-    """Require every simulated frame to match the integer reference exactly."""
+    """Check every frame exactly for integers, with fixed tolerances for floats."""
     project = Path(project_dir)
     manifest = json.loads((project / "data/data_manifest.json").read_text())
     expected_frames = manifest["run_iterations"]
     checked = 0
     final = spec.output_layer
+    floating = spec.datatype_profile.floating
     for a in range(final.A):
         for c in range(final.C):
-            golden = read_tokens(project / "data" / f"golden_{a}_{c}.txt")
-            output = read_tokens(project / "aiesimulator_output/data" / f"output_{a}_{c}.txt", simulator=True)
+            golden = read_tokens(project / "data" / f"golden_{a}_{c}.txt", floating=floating)
+            output = read_tokens(project / "aiesimulator_output/data" / f"output_{a}_{c}.txt", simulator=True, floating=floating)
             if golden.size == 0 or output.size != golden.size * expected_frames:
                 raise DataMismatchError(f"Expected {expected_frames} complete output frames")
             frames = output.reshape(expected_frames, golden.size)
-            if not np.all(frames == golden):
-                frame, position = np.argwhere(frames != golden)[0]
+            if floating:
+                rtol, atol = FLOAT_TOLERANCES[spec.datatype]
+                matched = np.isfinite(frames) & np.isfinite(golden) & np.isclose(frames, golden, rtol=rtol, atol=atol)
+            else:
+                matched = frames == golden
+            if not np.all(matched):
+                frame, position = np.argwhere(~matched)[0]
                 raise DataMismatchError(
-                    f"Frame {frame}, value {position}: expected {golden[position]}, got {frames[frame, position]}"
+                    f"Output {a}_{c}, frame {frame}, value {position}: expected {golden[position]}, got {frames[frame, position]}"
                 )
             checked += expected_frames
     return checked
@@ -353,10 +404,14 @@ def main():
         spec = load_spec(args.project_dir / "uorca_spec.json")
         if args.command == "generate":
             generate_data_files(spec, args.project_dir, seed=args.seed)
-            print(f"Wrote random INT8 test data and golden outputs to {args.project_dir / 'data'}")
+            print(f"Wrote random {spec.datatype.upper()} test data and golden outputs to {args.project_dir / 'data'}")
         else:
             count = compare_outputs(spec, args.project_dir)
-            print(f"Correctness check passed: {count} output frames match exactly")
+            if spec.datatype_profile.floating:
+                rtol, atol = FLOAT_TOLERANCES[spec.datatype]
+                print(f"Correctness check passed: {count} output frames match (rtol={rtol:g}, atol={atol:g})")
+            else:
+                print(f"Correctness check passed: {count} output frames match exactly")
     except (ValueError, KeyError, OSError, DataMismatchError) as exc:
         parser.exit(1, f"Error: {exc}\n")
 

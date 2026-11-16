@@ -5,7 +5,8 @@ PLATFORM ?= $(XILINX_VITIS)/base_platforms/xilinx_vek280_base_202410_1/xilinx_ve
 AIECC ?= aiecompiler
 AIESIM ?= aiesimulator
 AIE_FLAGS ?=
-AIESIM_CYCLE_TIMEOUT ?= 20000
+# Let the graph finish all iterations; slow FP32 graphs can exceed a fixed limit.
+AIESIM_CYCLE_TIMEOUT ?= 0
 AIE_SOURCES := $(wildcard src/aie/*.cc src/aie/*.cpp src/aie/*.h)
 
 .PHONY: graph aiesim clean

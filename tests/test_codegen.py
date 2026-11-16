@@ -98,9 +98,9 @@ class GeneratorTests(unittest.TestCase):
             with self.subTest(case=(stage, index, field)), self.assertRaises(SpecError):
                 build_spec_from_mapping(mapping)
 
-    def test_other_datatypes_are_rejected_by_generator(self):
-        for datatype in ("int4", "int16", "int32", "bf16", "fp32"):
-            with self.subTest(datatype=datatype), self.assertRaisesRegex(SpecError, "only int8"):
+    def test_unsupported_datatypes_are_rejected_by_generator(self):
+        for datatype in ("int32", "fp64", "fp32_safe", None):
+            with self.subTest(datatype=datatype), self.assertRaisesRegex(SpecError, "Unsupported datatype"):
                 build_model_spec(self.mapping["phi"], self.mapping["rho"], datatype=datatype)
 
     def test_block_layout_round_trip(self):

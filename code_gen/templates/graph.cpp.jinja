@@ -41,6 +41,38 @@ std::vector<T> load_txt(const std::string& filename, size_t expected_size) {
     return data;
 }
 
+{% if profile.floating %}
+template <typename T>
+std::vector<T> load_float_txt(const std::string& filename, size_t expected_size) {
+    std::ifstream file(filename);
+    if (!file) {
+        throw std::runtime_error("Cannot open data file: " + filename);
+    }
+    std::vector<T> data;
+    float value = 0;
+    while (file >> value) data.push_back(T(value));
+    if (data.size() != expected_size) {
+        throw std::runtime_error("Data file size mismatch for " + filename);
+    }
+    return data;
+}
+
+{% endif %}
+{% if profile.name == "int4" %}
+std::vector<int8> pack_int4(const std::vector<int8>& logical) {
+    if (logical.size() % 2 != 0) {
+        throw std::runtime_error("INT4 logical element count must be even");
+    }
+    std::vector<int8> packed(logical.size() / 2);
+    for (size_t i = 0; i < packed.size(); ++i) {
+        const uint8_t even = static_cast<uint8_t>(logical[2 * i]) & 0xf;
+        const uint8_t odd = static_cast<uint8_t>(logical[2 * i + 1]) & 0xf;
+        packed[i] = static_cast<int8>((odd << 4) | even);
+    }
+    return packed;
+}
+{% endif %}
+
 {{ spec.graph_name }} graph1;
 
 #if defined(__AIESIM__) || defined(__X86SIM__)
@@ -56,7 +88,11 @@ int main(int argc, char** argv) {
                 std::string bias_file =
                     std::string(DATA_DIR) + "{{ layer.name }}_bias_" +
                     std::to_string(a) + "_" + std::to_string(c) + ".txt";
+{% if profile.name in ("bf16", "fp32") %}
+                auto bias = load_float_txt<float>(bias_file, colB);
+{% else %}
                 auto bias = load_txt<int>(bias_file, colB);
+{% endif %}
                 graph1.update(
                     graph1.{{ layer.name }}_bias[a][c],
                     bias.data(),
@@ -71,8 +107,14 @@ int main(int argc, char** argv) {
                         std::string(DATA_DIR) + "{{ layer.name }}_weight_" +
                         std::to_string(a) + "_" + std::to_string(b) + "_" +
                         std::to_string(c) + ".txt";
+{% if profile.name == "int4" %}
+                    auto logical_weight = load_txt<int8>(weight_file, colA * colB);
+                    auto weight = pack_int4(logical_weight);
+{% elif profile.name in ("bf16", "fp32") %}
+                    auto weight = load_float_txt<{{ profile.weight_cpp_type }}>(weight_file, colA * colB);
+{% else %}
                     auto weight = load_txt<{{ profile.weight_cpp_type }}>(weight_file, colA * colB);
-
+{% endif %}
                     graph1.update(
                         graph1.{{ layer.name }}_weight[a][b][c],
                         weight.data(),

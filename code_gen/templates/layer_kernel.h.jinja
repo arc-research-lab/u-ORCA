@@ -33,8 +33,11 @@ void {{ kernel.kernel_name }}(
 {% else %}
     input_cascade<{{ profile.accumulator_cpp_type }}>* __restrict cascade_i,
 {% endif %}
+{% if profile.name == "int4" %}
+    const int8(&weight1)[{{ name }}::colA * {{ name }}::colB / 2],
+{% else %}
     const {{ profile.weight_cpp_type }}(&weight1)[{{ name }}::colA * {{ name }}::colB],
-
+{% endif %}
 {% if kernel.needs_bias_port %}
     const {{ profile.bias_cpp_type }}(&bias)[{{ name }}::colB],
 {% endif %}

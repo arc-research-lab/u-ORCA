@@ -1,4 +1,4 @@
-"""Write an INT8 AIE project from a validated design specification."""
+"""Write an AIE project from a validated design specification."""
 
 from __future__ import annotations
 

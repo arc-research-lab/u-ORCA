@@ -1,4 +1,4 @@
-"""Search a logical model and save the selected INT8 code-generation spec."""
+"""Search a logical model and save the selected code-generation spec."""
 
 import argparse
 import json

@@ -1,0 +1,27 @@
+#include <aie_api/aie.hpp>
+#include <type_traits>
+#include "{{ header_file }}"
+
+using namespace {{ name }};
+
+void {{ kernel_name }}(
+    adf::input_buffer<int16>& __restrict input_act,
+    output_cascade<acc64>* __restrict cascade_o) {
+    int16* __restrict pA = input_act.data();
+    using MMUL = aie::mmul<blk_M, blk_N, blk_N, int16, int16, acc64>;
+    static_assert(std::is_same_v<typename MMUL::accum_type::value_type, acc64>);
+    const int16 weights_mem[16] = {
+        1,1,1,1, 0,0,0,0, 0,0,0,0, 0,0,0,0};
+    auto weights = aie::load_v<MMUL::size_A>(weights_mem);
+    for (unsigned j = 0; j < bound_j; ++j)
+        chess_prepare_for_pipelining chess_loop_range(bound_j, bound_j) {
+        int16* pA1 = pA + j * blk_size;
+        int16* pA2 = pA + (bound_j + j) * blk_size;
+        auto activation1 = aie::load_v<MMUL::size_B>(pA1);
+        auto activation2 = aie::load_v<MMUL::size_B>(pA2);
+        MMUL accumulator;
+        accumulator.mul(weights, activation1);
+        accumulator.mac(weights, activation2);
+        put_mcd(accumulator.to_accum());
+    }
+}

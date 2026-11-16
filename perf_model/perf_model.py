@@ -1,41 +1,59 @@
-"""The published, calibrated INT8 cost model. Layer estimates use AIE cycles."""
+"""The calibrated cost model. Layer estimates use AIE cycles."""
 
 import math
 
-from code_gen.spec import INT8_PROFILE, require_int8
+from code_gen.spec import DATATYPE_PROFILES, resolve_datatype_profile
 
 DATATYPE_CONFIGS = {
-    "int8": {
-        "BM": INT8_PROFILE.BM, "BK": INT8_PROFILE.BK, "BN": INT8_PROFILE.BN,
-        "mac_cycles": 1, "byte_per_element": 1,
-    }
+    name: {
+        "BM": profile.BM, "BK": profile.BK, "BN": profile.BN,
+        # FP32 uses the historical trace-calibrated fp32_safe cost profile.
+        "mac_cycles": 38 if name == "fp32" else 1,
+        "byte_per_element": profile.activation_bytes,
+    } for name, profile in DATATYPE_PROFILES.items()
 }
 CALIBRATED_STAGE_PARAMS = {
+    "int4": {
+        "phi": {"L_setup": 30, "L_o": 1, "O_cas": 0},
+        "rho": {"L_setup": 1, "L_o": 19, "O_cas": 0},
+    },
     "int8": {
         "phi": {"L_setup": 15, "L_o": 9, "O_cas": 0},
         "rho": {"L_setup": 18, "L_o": 10, "O_cas": 0},
-    }
+    },
+    "int16": {
+        "phi": {"L_setup": 18, "L_o": 13, "O_cas": 0},
+        "rho": {"L_setup": 42, "L_o": 3, "O_cas": 0},
+    },
+    "bf16": {
+        "phi": {"L_setup": 28, "L_o": 1, "O_cas": 0},
+        "rho": {"L_setup": 2, "L_o": 44, "O_cas": 0},
+    },
+    "fp32": {
+        "phi": {"L_setup": 12, "L_o": 1, "O_cas": 0},
+        "rho": {"L_setup": 0, "L_o": 237, "O_cas": 0},
+    },
 }
 AIE_CYCLES_PER_NS = 1.25
-GLOBAL_AGGREGATION_NS = {"int8": 150}
+GLOBAL_AGGREGATION_NS = {datatype: 150 for datatype in DATATYPE_PROFILES}
 
 
 def get_stage_params(datatype, stage):
-    """Return the published INT8 parameters for phi or rho."""
-    require_int8(datatype)
+    """Return calibrated parameters for phi or rho."""
+    resolve_datatype_profile(datatype)
     if stage not in ("phi", "rho"):
         raise ValueError("stage must be phi or rho")
     return dict(CALIBRATED_STAGE_PARAMS[datatype][stage])
 
 
 def get_global_aggregation_ns(datatype="int8"):
-    require_int8(datatype)
+    resolve_datatype_profile(datatype)
     return GLOBAL_AGGREGATION_NS[datatype]
 
 
 def estimate_layer(in_param, params, datatype="int8"):
     """Estimate cycles for [M, K, N, A, B, C, bias, relu]."""
-    require_int8(datatype)
+    resolve_datatype_profile(datatype)
     M, K, N, A, B, C, bias, _relu = in_param
     profile = DATATYPE_CONFIGS[datatype]
     h1, w1, w2 = math.ceil(M / A), math.ceil(K / B), math.ceil(N / C)
@@ -49,7 +67,7 @@ def estimate_layer(in_param, params, datatype="int8"):
 
 def estimate_model(in_params, mode, configs, datatype="int8"):
     """Return (total, compute, communication) in AIE cycles for one stage."""
-    require_int8(datatype)
+    profile = resolve_datatype_profile(datatype)
     if mode not in ("pl", "shared_mem", "direct", "cascade"):
         raise ValueError("mode must be pl, shared_mem, direct, or cascade")
     if not in_params:
@@ -63,8 +81,8 @@ def estimate_model(in_params, mode, configs, datatype="int8"):
         elif mode == "direct":
             distance = B
         rows = math.ceil(M / A)
-        inputs.append(30 + rows * math.ceil(K / B) / 4 + 4 * distance)
-        outputs.append(30 + rows * math.ceil(N / C) / 4 + 4 * distance)
+        inputs.append(30 + rows * math.ceil(K / B) * profile.activation_bytes / 4 + 4 * distance)
+        outputs.append(30 + rows * math.ceil(N / C) * profile.activation_bytes / 4 + 4 * distance)
     if mode in ("pl", "shared_mem"):
         communication = sum(inputs) + sum(outputs)
         overhead = len(in_params) * (2 * 1250 / 300 if mode == "pl" else 1)

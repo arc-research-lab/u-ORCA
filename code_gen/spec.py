@@ -1,4 +1,4 @@
-"""INT8 DeepSets/MLP specifications and the shape rules shared with DSE."""
+"""DeepSets/MLP specifications and datatype-specific shape rules shared with DSE."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ Role = Literal["first", "body", "last", "single"]
 
 
 class SpecError(ValueError):
-    """Raised when a model cannot be represented by the INT8 generator."""
+    """Raised when a model cannot be represented by the generator."""
 
 
 @dataclass(frozen=True)
@@ -28,13 +28,46 @@ class DatatypeProfile:
     matmul_shift: int = 7
     aggregation_shift: int = 6
 
+    @property
+    def floating(self) -> bool:
+        return self.name in ("bf16", "fp32")
+
+    @property
+    def activation_bytes(self) -> int:
+        return {"int8": 1, "int4": 1, "int16": 2, "bf16": 2, "fp32": 4}[self.name]
+
+    @property
+    def cascade_k_multiple(self) -> int:
+        # INT8/INT16 pack two K tiles into one cascade transfer.
+        return 2 if self.name in ("int8", "int16") else 1
+
 
 INT8_PROFILE = DatatypeProfile()
+INT4_PROFILE = DatatypeProfile(name="int4", weight_cpp_type="int4", BK=16, matmul_shift=3)
+INT16_PROFILE = DatatypeProfile(
+    name="int16", input_cpp_type="int16", weight_cpp_type="int16",
+    accumulator_cpp_type="acc64", output_cpp_type="int16", BK=4, BN=4,
+    matmul_shift=15, aggregation_shift=14,
+)
+BF16_PROFILE = DatatypeProfile(
+    name="bf16", input_cpp_type="bfloat16", weight_cpp_type="bfloat16",
+    bias_cpp_type="float", accumulator_cpp_type="accfloat", output_cpp_type="bfloat16",
+    BN=4, matmul_shift=0, aggregation_shift=0,
+)
+FP32_PROFILE = DatatypeProfile(
+    name="fp32", input_cpp_type="float", weight_cpp_type="float",
+    bias_cpp_type="float", accumulator_cpp_type="accfloat", output_cpp_type="float",
+    BN=4, matmul_shift=0, aggregation_shift=0,
+)
+DATATYPE_PROFILES = {profile.name: profile for profile in (
+    INT8_PROFILE, INT4_PROFILE, INT16_PROFILE, BF16_PROFILE, FP32_PROFILE,
+)}
 
 
-def require_int8(datatype: object) -> None:
-    if datatype != "int8":
-        raise SpecError("This release supports only int8")
+def resolve_datatype_profile(datatype: object) -> DatatypeProfile:
+    if not isinstance(datatype, str) or datatype not in DATATYPE_PROFILES:
+        raise SpecError(f"Unsupported datatype {datatype!r}; choose {', '.join(DATATYPE_PROFILES)}")
+    return DATATYPE_PROFILES[datatype]
 
 
 def _require_positive_int(name: str, value: int) -> None:
@@ -90,7 +123,7 @@ class LayerInput:
 
 @dataclass(frozen=True)
 class LayerSpec:
-    """One logical layer and its INT8 MMUL tile."""
+    """One logical layer and its datatype-selected MMUL tile."""
 
     input: LayerInput
     BM: int
@@ -156,7 +189,7 @@ class LayerSpec:
 
 @dataclass(frozen=True)
 class AggregationSpec:
-    """INT8 sum aggregation derived from the final phi layer."""
+    """Sum aggregation derived from the final phi layer."""
 
     PM: int
     PN: int
@@ -261,10 +294,11 @@ def _parse_inputs(values: Iterable[Sequence[int]], label: str) -> tuple[LayerInp
     return inputs
 
 
-def validate_layer(layer: LayerSpec, stage: Stage, index: int) -> None:
+def validate_layer(layer: LayerSpec, stage: Stage, index: int, datatype: str = "int8") -> None:
     """Check one physical layer, including its cascade packet alignment."""
     if stage not in ("phi", "rho", "mlp"):
         raise SpecError(f"unknown stage: {stage}")
+    profile = resolve_datatype_profile(datatype)
     label = f"{stage}[{index}]"
     layer.input.validate(label)
     for name, value, tile in (
@@ -281,21 +315,21 @@ def validate_layer(layer: LayerSpec, stage: Stage, index: int) -> None:
         _require_even(f"{label}.bound_i", layer.bound_i, "M/A/BM")
     elif layer.M != 4 or layer.A != 1:
         raise SpecError(f"{label} must use M=4 and A=1")
-    if stage == "rho" or index > 0:
+    if profile.cascade_k_multiple == 2 and (stage == "rho" or index > 0):
         _require_even(f"{label}.bound_k", layer.bound_k, "K/B/BK; cascade packets")
 
 
 def build_stage_specs(
-    values: Iterable[Sequence[int]], stage: Stage
+    values: Iterable[Sequence[int]], stage: Stage, datatype: str = "int8"
 ) -> tuple[LayerSpec, ...]:
     """Validate a whole MLP, phi or rho chain; DSE uses these same checks."""
-    profile = INT8_PROFILE
+    profile = resolve_datatype_profile(datatype)
     layers = tuple(
         LayerSpec(item, profile.BM, profile.BK, profile.BN)
         for item in _parse_inputs(values, stage)
     )
     for index, layer in enumerate(layers):
-        validate_layer(layer, stage, index)
+        validate_layer(layer, stage, index, datatype)
         if index:
             previous = layers[index - 1]
             if previous.M != layer.M or previous.N != layer.K:
@@ -327,11 +361,11 @@ def build_mlp_spec(
     MLP uses the same local-memory kernels as phi, with no aggregation or
     rho stage. Its common A is independent of DeepSets' aggregation layout.
     """
-    require_int8(datatype)
+    profile = resolve_datatype_profile(datatype)
     _validate_graph_name(graph_name)
     return ModelSpec(
-        datatype_profile=INT8_PROFILE,
-        phi_layers=build_stage_specs(layers, "mlp"),
+        datatype_profile=profile,
+        phi_layers=build_stage_specs(layers, "mlp", datatype),
         aggregation=None,
         rho_layers=(),
         graph_name=graph_name,
@@ -347,20 +381,20 @@ def build_model_spec(
     graph_name: str = "UOrcaGraph",
     metadata: dict[str, object] | None = None,
 ) -> ModelSpec:
-    """Build the INT8 specification used by both search and generation."""
-    require_int8(datatype)
+    """Build the specification used by both search and generation."""
+    profile = resolve_datatype_profile(datatype)
     _validate_graph_name(graph_name)
-    phi_layers = build_stage_specs(phi, "phi")
-    rho_layers = build_stage_specs(rho, "rho")
+    phi_layers = build_stage_specs(phi, "phi", datatype)
+    rho_layers = build_stage_specs(rho, "rho", datatype)
     final_phi = phi_layers[-1]
     if final_phi.N != rho_layers[0].K:
         raise SpecError("rho[0].K must match final phi N")
     return ModelSpec(
-        datatype_profile=INT8_PROFILE,
+        datatype_profile=profile,
         phi_layers=phi_layers,
         aggregation=AggregationSpec(
             PM=final_phi.M, PN=final_phi.N, A=final_phi.A,
-            BM=INT8_PROFILE.BM, BN=INT8_PROFILE.BN,
+            BM=profile.BM, BN=profile.BN,
         ),
         rho_layers=rho_layers,
         graph_name=graph_name,

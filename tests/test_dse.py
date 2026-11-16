@@ -31,7 +31,7 @@ class SearchTests(unittest.TestCase):
 
     def test_invalid_cheaper_cascade_candidate_is_skipped(self):
         # Make larger B attractive, including illegal one-tile cascade inputs.
-        with patch("perf_model.DSE_new.estimate_layer", side_effect=lambda layer, params: -100 * layer[4]):
+        with patch("perf_model.DSE_new.estimate_layer", side_effect=lambda layer, params, datatype: -100 * layer[4]):
             result = deepsets_estimation_new(self.phi, self.rho)
         self.assertEqual([layer[4] for layer in result["phi_config"]], [4, 2])
         self.assertEqual([layer[4] for layer in result["rho_config"]], [2, 2])
@@ -72,8 +72,8 @@ class SearchTests(unittest.TestCase):
         self.assertIsNone(deepsets_estimation_new(self.phi, self.rho)["phi_config"])
 
     def test_unsupported_precision_is_rejected(self):
-        for datatype in ("int4", "int16", "int32", "bf16", "fp32", "fp32_safe"):
-            with self.subTest(datatype=datatype), self.assertRaisesRegex(SpecError, "only int8"):
+        for datatype in ("int32", "fp64", "fp32_safe", None):
+            with self.subTest(datatype=datatype), self.assertRaisesRegex(SpecError, "Unsupported datatype"):
                 deepsets_estimation_new(self.phi, self.rho, datatype=datatype)
 
     def test_bad_shape_values_are_rejected(self):

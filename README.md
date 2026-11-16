@@ -6,7 +6,7 @@
 
 ## Overview
 
-u-ORCA estimates performance and generates accelerator code for microsecond-scale DNN inference on AMD ACAP devices. This release supports **INT8 MLP and DeepSets models**.
+u-ORCA estimates performance and generates accelerator code for microsecond-scale DNN inference on AMD ACAP devices. This release supports **MLP and DeepSets models** with INT8, INT4 weights, INT16, BF16, or FP32.
 
 - The `perf_model` folder estimates latency and searches for a hardware configuration. This search is called design space exploration (DSE).
 - The `code_gen` folder contains the code generation framework that generates the AIE code from shape specifications.
@@ -64,7 +64,19 @@ A DeepSets example is provided in `perf_model/example.json`. The `phi` layers pr
 
 Copy either example and change the layer sizes for your model. MLP needs at least one layer; DeepSets needs at least two phi layers and two rho layers. DSE enables bias and ReLU in every layer.
 
-DSE rounds sizes up to fit the INT8 kernels and saves both the original shapes and the hardware sizes. For example, an MLP with `M=1` uses a hardware matrix with 8 rows. It skips unsupported configurations and chooses the one with the lowest estimated latency. It reports an error if no design fits.
+Both examples use `"datatype": "int8"`. To change the datatype, edit that field in your JSON. Use one datatype for the whole model:
+
+| `datatype` | Inputs and outputs | Weights |
+| --- | --- | --- |
+| `int8` | INT8 | INT8 |
+| `int4` | INT8 | Signed INT4, from -8 to 7 |
+| `int16` | INT16 | INT16 |
+| `bf16` | BF16 | BF16 |
+| `fp32` | FP32 | FP32 |
+
+For example, use `"datatype": "bf16"` for a BF16 model. The same generation and simulation commands work for every datatype. Integer models use INT32 bias; floating-point models use FP32 bias. INT4 weights are packed automatically when the simulator loads them.
+
+DSE rounds sizes up to fit the selected kernels and saves both the original shapes and the hardware sizes. For example, an MLP with `M=1` uses a hardware matrix with 8 rows. It skips unsupported configurations and chooses the one with the lowest estimated latency. It reports an error if no design fits.
 
 ### Generate the code
 
@@ -84,6 +96,8 @@ Each command prints the estimated latency and creates the chosen output folder. 
 
 The full latency estimate includes input and output transfers. The AIE-only estimate excludes them. Both are in nanoseconds. The parameter count includes weights and biases after padding. The random inputs and weights test the generated code; they are not trained model parameters.
 
+FP32 uses accurate multiplication in the generated code. Its performance estimates use the earlier calibration, which has not been updated for this arithmetic change.
+
 To run only the performance model and DSE, without generating a project:
 
 ```shell
@@ -101,6 +115,10 @@ python -m code_gen.data compare --project-dir build/deepsets
 ```
 
 `make aiesim` compiles the graph before running the simulator. The last command compares every simulated output with the Python reference and reports whether they match. To test the MLP project, use `build/mlp` in both commands.
+
+By default, simulation runs until all 20 iterations finish. To set a cycle limit, add `AIESIM_CYCLE_TIMEOUT=100000` to the make command. A limit that is too short leaves incomplete outputs.
+
+Integer outputs must match exactly. Floating-point outputs allow small rounding differences: BF16 allows 0.1% relative error plus 0.001 absolute error; FP32 allows 0.01% relative error plus 0.00001 absolute error.
 
 The Makefile uses the VEK280 platform under `$XILINX_VITIS/base_platforms`. If your platform is elsewhere, add `PLATFORM=/path/to/platform.xpfm` to the make command.
 
@@ -149,9 +167,18 @@ For DeepSets, use `phi` and `rho` lists with the same eight fields per layer. Yo
 Manual specs use hardware sizes and are checked without padding:
 
 - `M/A` must be a multiple of 8 for MLP and phi layers.
-- `N` must be a multiple of 16. `K/B` must be a multiple of 8 in the first MLP or phi layer, and a multiple of 16 in later layers and rho.
 - DeepSets requires `M/A=8` in the final phi layer with `A>=2`; rho requires `M=4, A=1`.
 - Adjacent layer widths must match, and all partition sizes must divide evenly.
+
+The width requirements depend on the datatype:
+
+| `datatype` | `N` must be a multiple of | First MLP or phi `K/B` | Later layers and rho `K/B` |
+| --- | --- | --- | --- |
+| `int8` | 16 | Multiple of 8 | Multiple of 16 |
+| `int4` | 16 | Multiple of 16 | Multiple of 16 |
+| `int16` | 8 | Multiple of 4 | Multiple of 8 |
+| `bf16` | 8 | Multiple of 8 | Multiple of 8 |
+| `fp32` | 8 | Multiple of 8 | Multiple of 8 |
 
 Generate the project without running DSE:
 
@@ -163,7 +190,7 @@ python -m code_gen.generate --spec code_gen/example_mlp_design.json --out-dir bu
 
 - `perf_model/`: performance estimation and design search.
   - `perf_model.py`: estimates the cost of layers and their data transfers.
-  - `DSE_new.py`: searches for a supported INT8 MLP or DeepSets configuration.
+  - `DSE_new.py`: searches for a supported MLP or DeepSets configuration for the selected datatype.
   - `main.py`: runs DSE and saves a design JSON without generating code.
   - `example.json`: contains the DeepSets input shapes.
   - `example_mlp.json`: contains the MLP input shapes.
@@ -172,10 +199,10 @@ python -m code_gen.generate --spec code_gen/example_mlp_design.json --out-dir bu
   - `generate.py`: creates a project from model shapes or a manual design spec.
   - `spec.py`: parses the design and checks the supported hardware sizes.
   - `generator.py`: renders the C++ files from the templates.
-  - `data.py`: creates random INT8 test data and compares simulator outputs.
+  - `data.py`: creates random test data and compares simulator outputs.
   - `__init__.py`: exports the design builders for Python callers.
   - `example_mlp_design.json`: contains the manual MLP design shown above.
-  - `templates/`: contains the INT8 layer, aggregation, header, and graph templates.
+  - `templates/`: contains the layer, aggregation, header, and graph templates for each datatype.
   - `project_template/Makefile`: compiles and simulates a generated AIE project.
 - `demo/`: the complete VEK280 reference design.
   - `Makefile`: selects the platform and exposes the build commands.
@@ -191,6 +218,7 @@ python -m code_gen.generate --spec code_gen/example_mlp_design.json --out-dir bu
   - `test_dse.py`: checks search limits, skipped configurations, and performance estimates.
   - `test_codegen.py`: checks design validation, generated files, and data comparison.
   - `test_mlp.py`: checks MLP search, output partitions, and the unified command.
+  - `test_datatypes.py`: checks datatype constraints, calibrated costs, and numeric output comparison.
 - `requirements.txt`: lists the Python dependencies.
 
 ### Generated AIE project file structure
@@ -213,7 +241,7 @@ Compilation adds `libadf.a` and `Work/`. Simulation writes its outputs to `aiesi
 
 Generated AIE projects expose PLIO ports for inputs and outputs. Running them on a board also needs a PL controller and a CPU host program. The PL controller must match the graph's ports, data layout, and transfer sizes.
 
-`demo/` contains the reference project from `20260502_FCCM_demo/demo_PL`. It uses three `64 x 64 x 64` phi layers, followed by aggregation and two rho layers (`4 x 64 x 64` and `4 x 64 x 16`). Its host program uses synthetic inputs and weights and prints latency statistics.
+`demo/` contains the INT8 reference project from `20260502_FCCM_demo/demo_PL`. It uses three `64 x 64 x 64` phi layers, followed by aggregation and two rho layers (`4 x 64 x 64` and `4 x 64 x 16`). Its host program uses synthetic inputs and weights and prints latency statistics. A generated graph with another datatype needs matching changes to the PL controller and host program before it can run on the board.
 
 In addition to Vitis 2024.1, install the matching Versal common image and its SDK. `EDGE_COMMON_SW` must point to the folder containing `Image` and `rootfs.ext4`; `SYSROOT` must point to the installed SDK's target sysroot, which contains the ARM libraries and XRT headers.
 

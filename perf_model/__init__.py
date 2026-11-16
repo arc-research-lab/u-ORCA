@@ -1,4 +1,4 @@
-"""INT8 performance estimates and generator-compatible design search."""
+"""Performance estimates and generator-compatible design search."""
 
 from .perf_model import (
     DATATYPE_CONFIGS,

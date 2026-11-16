@@ -117,7 +117,7 @@ class MlpTests(unittest.TestCase):
     def test_invalid_model_creates_no_project(self):
         with tempfile.TemporaryDirectory() as directory:
             model = Path(directory) / "invalid.json"
-            model.write_text(json.dumps({"model_type": "mlp", "layers": [[8, 16, 16]], "datatype": "fp32"}))
+            model.write_text(json.dumps({"model_type": "mlp", "layers": [[8, 16, 16]], "datatype": "int32"}))
             project = Path(directory) / "project"
             with self.assertRaises(SpecError):
                 prepare_project(model, project, search=True)
